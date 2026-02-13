@@ -274,6 +274,12 @@ CRITICAL: You are an API endpoint. You MUST output ONLY valid JSON. Do NOT inclu
    - Missing required diagram = note in feedback, deduct accordingly
    - Rough but identifiable drawing = award marks (accuracy > neatness)
 
+8. **Handling Internal Choices (OR Questions)**:
+   - If a question has internal choices (e.g., "Q22 (a)" OR "Q22 (b)"), evaluate ONLY the one attempted by the student.
+   - Do NOT create separate JSON entries for the unattempted choice(s).
+   - If the marking scheme lists "Q22(a)" and "Q22(b) OR", treat them as a single question entity.
+   - Output a SINGLE evaluation object for the main question number (e.g., "Q22") containing the evaluation of the attempted part.
+
 IMPORTANT: Follow the marking scheme EXACTLY. Provide constructive feedback.
 
 You MUST respond with ONLY this JSON structure (no other text):
@@ -282,7 +288,7 @@ You MUST respond with ONLY this JSON structure (no other text):
     "max_total": <number>,
     "confidence": "high" | "medium" | "low",
     "overall_feedback": "Brief overall feedback",
-    "warnings": ["list of warnings"],
+    "warnings": ["global issues only (e.g. blurriness, missing pages) - DO NOT put question-specific errors here"],
     "evaluations": [
         {
             "q_no": "Q1",
@@ -618,17 +624,40 @@ def merge_evaluation_results(batch_results: list) -> dict:
         if fb:
             feedbacks.append(fb)
         
-        merged["warnings"].extend(result.get("warnings", []))
+    # Filter out warnings that refer to questions we successfully evaluated
+    # (e.g. remove "Q22 is incomplete" if we have a good evaluation for Q22 from another batch)
+    final_warnings = []
+    unique_warnings = set()
     
-    # Recalculate totals from merged evaluations
-    merged["total_score"] = sum(e.get("marks", 0) for e in merged["evaluations"])
-    merged["max_total"] = sum(e.get("max_marks", 0) for e in merged["evaluations"])
-    
-    # Set confidence to lowest across batches
-    for level, val in confidence_rank.items():
-        if val == min_confidence:
-            merged["confidence"] = level
-            break
+    # helper to find question references in text
+    def find_mentioned_questions(text):
+        return set(re.findall(r'Q(\d+)', text, re.IGNORECASE) + 
+                  re.findall(r'Question\s+(\d+)', text, re.IGNORECASE))
+
+    # Identify successfully evaluated questions
+    successful_questions = set()
+    for eval_item in merged["evaluations"]:
+        q_no = eval_item.get("q_no", "")
+        # Extract purely numeric part (e.g. "22" from "Q22")
+        nums = re.findall(r'\d+', q_no)
+        if nums and eval_item.get("status") == "Attempted":
+            successful_questions.add(nums[0])
+
+    for warning in merged["warnings"]:
+        if warning in unique_warnings:
+            continue
+            
+        mentioned_q_nums = find_mentioned_questions(warning)
+        
+        # If warning mentions a question that we successfully evaluated, skip the warning
+        # (It's likely a "partial view" warning from an earlier batch)
+        if mentioned_q_nums & successful_questions:
+            continue
+            
+        unique_warnings.add(warning)
+        final_warnings.append(warning)
+        
+    merged["warnings"] = final_warnings
     
     merged["overall_feedback"] = " ".join(feedbacks)
     
